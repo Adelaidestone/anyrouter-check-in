@@ -23,46 +23,99 @@ BALANCE_HASH_FILE = 'balance_hash.txt'
 
 
 def load_balance_hash():
-	"""加载余额hash"""
-	try:
-		if os.path.exists(BALANCE_HASH_FILE):
-			with open(BALANCE_HASH_FILE, 'r', encoding='utf-8') as f:
-				return f.read().strip()
-	except Exception:
-		pass
-	return None
+    """加载余额hash"""
+    try:
+        if os.path.exists(BALANCE_HASH_FILE):
+            with open(BALANCE_HASH_FILE, 'r', encoding='utf-8') as f:
+                return f.read().strip()
+    except Exception:
+        pass
+    return None
 
 
 def save_balance_hash(balance_hash):
-	"""保存余额hash"""
-	try:
-		with open(BALANCE_HASH_FILE, 'w', encoding='utf-8') as f:
-			f.write(balance_hash)
-	except Exception as e:
-		print(f'Warning: Failed to save balance hash: {e}')
+    """保存余额hash"""
+    try:
+        with open(BALANCE_HASH_FILE, 'w', encoding='utf-8') as f:
+            f.write(balance_hash)
+    except Exception as e:
+        print(f'Warning: Failed to save balance hash: {e}')
 
 
 def generate_balance_hash(balances):
-	"""生成余额数据的hash"""
-	# 将包含 quota 和 used 的结构转换为简单的 quota 值用于 hash 计算
-	simple_balances = {k: v['quota'] for k, v in balances.items()} if balances else {}
-	balance_json = json.dumps(simple_balances, sort_keys=True, separators=(',', ':'))
-	return hashlib.sha256(balance_json.encode('utf-8')).hexdigest()[:16]
+    """生成余额数据的hash"""
+    # 将包含 quota 和 used 的结构转换为简单的 quota 值用于 hash 计算
+    simple_balances = {k: v['quota'] for k, v in balances.items()} if balances else {}
+    balance_json = json.dumps(simple_balances, sort_keys=True, separators=(',', ':'))
+    return hashlib.sha256(balance_json.encode('utf-8')).hexdigest()[:16]
+
+GSC_WORKSHEET = None
+
+
+def _get_gs_worksheet():
+    global GSC_WORKSHEET
+    if GSC_WORKSHEET is not None:
+        return GSC_WORKSHEET
+    try:
+        import google_sheets_connector as gsc
+        GSC_WORKSHEET = getattr(gsc, 'worksheet', None)
+        return GSC_WORKSHEET
+    except Exception as e:
+        print(f'[WARN] Google Sheets connector not available: {e}')
+        return None
+
+
+def _find_header_index(headers, candidates):
+    lowered = [str(h).strip().lower() for h in headers]
+    for cand in candidates:
+        c = str(cand).strip().lower()
+        if c in lowered:
+            return lowered.index(c) + 1
+    return None
+
+
+def update_google_sheet_balance(account_name, quota, used_quota):
+    ws = _get_gs_worksheet()
+    if not ws:
+        return
+    try:
+        headers = ws.row_values(1)
+        if not headers:
+            print('[WARN] Google Sheet headers not found, skip updating')
+            return
+        name_col = _find_header_index(headers, ['用户名', 'name', '账号', '账户', '账户名', '用户'])
+        total_col = _find_header_index(headers, ['总余额', '余额', 'total', 'quota'])
+        used_col = _find_header_index(headers, ['已用余额', '已用', 'used', 'used_quota'])
+        if not name_col or not total_col or not used_col:
+            print('[WARN] Header columns not found in Google Sheet, skip updating')
+            return
+        name_column_values = ws.col_values(name_col)
+        row_index = None
+        for idx, cell in enumerate(name_column_values, start=1):
+            if str(cell).strip() == str(account_name).strip():
+                row_index = idx
+                break
+        if not row_index:
+            print(f"[WARN] Username '{account_name}' not found in Google Sheet, skip updating")
+            return
+        ws.update_cell(row_index, total_col, quota)
+        ws.update_cell(row_index, used_col, used_quota)
+        print(f"[INFO] Google Sheet updated for {account_name}: total={quota}, used={used_quota}")
+    except Exception as e:
+        print(f"[WARN] Failed to update Google Sheet for {account_name}: {e}")
 
 
 def parse_cookies(cookies_data):
-	"""解析 cookies 数据"""
-	if isinstance(cookies_data, dict):
-		return cookies_data
-
-	if isinstance(cookies_data, str):
-		cookies_dict = {}
-		for cookie in cookies_data.split(';'):
-			if '=' in cookie:
-				key, value = cookie.strip().split('=', 1)
-				cookies_dict[key] = value
-		return cookies_dict
-	return {}
+    if isinstance(cookies_data, dict):
+        return cookies_data
+    if isinstance(cookies_data, str):
+        cookies_dict = {}
+        for cookie in cookies_data.split(';'):
+            if '=' in cookie:
+                key, value = cookie.strip().split('=', 1)
+                cookies_dict[key] = value
+        return cookies_dict
+    return {}
 
 
 async def get_waf_cookies_with_playwright(account_name: str, login_url: str):
@@ -247,6 +300,7 @@ async def check_in_account(account: AccountConfig, account_index: int, app_confi
 		user_info = get_user_info(client, headers, user_info_url)
 		if user_info and user_info.get('success'):
 			print(user_info['display'])
+			update_google_sheet_balance(account_name, user_info['quota'], user_info['used_quota'])
 		elif user_info:
 			print(user_info.get('error', 'Unknown error'))
 
